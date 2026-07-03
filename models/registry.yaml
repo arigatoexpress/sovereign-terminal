@@ -1,0 +1,95 @@
+# Sovereign Agent Model Registry
+# Single source of truth for local + cloud model aliases.
+# Local models route through the remote-gpu-gateway (auth + tier failover
+# Windows RTX 5070 Ti -> Mac Ollama). Auth: set OLLAMA_API_KEY to GATEWAY_TOKEN
+# from ~/Code/remote-gpu-gateway/.env — never hardcode it here.
+# Refreshed 2026-07-03 (holistic audit): gateway-first base_url, benchmark-backed
+# roster (2026-06-22 v3 hard eval), mxbai embeddings, dated models pruned.
+
+local:
+  base_url: http://127.0.0.1:8800/v1   # remote-gpu-gateway (NOT raw Ollama)
+  api_key: env:OLLAMA_API_KEY
+  default: codestral:22b
+  models:
+    codestral:22b:
+      provider: ollama
+      name: codestral:22b
+      context: 32768          # served at num_ctx 16384 (see ~/.aider.model.settings.yml)
+      role: coder
+      description: DEFAULT coder — non-thinking, FIM-trained for diff edits (92.4% Mac bench)
+    qwen2.5-coder:14b:
+      provider: ollama
+      name: qwen2.5-coder:14b
+      context: 32768
+      role: coder
+      description: Fallback coder — lighter than codestral, solid diffs
+    qwen3:14b:
+      provider: ollama
+      name: qwen3:14b
+      context: 131072         # thinking model — needs think:false via harness (v3 eval champion 97%)
+      role: coder-gen
+      description: Top code GENERATOR + overall champion; verify edit-format before daily-driving in aider
+    devstral:24b:
+      provider: ollama
+      name: devstral:24b
+      context: 131072
+      role: agent
+      description: Highest-quality general/agentic model on the Mac (92.3%)
+    deepseek-r1:14b:
+      provider: ollama
+      name: deepseek-r1:14b
+      context: 131072
+      role: reason
+      description: Local reasoning model for deep design work
+    qwen3:4b:
+      provider: ollama
+      name: qwen3:4b
+      context: 262144
+      role: fast
+      description: Fast local agent with largest context window
+    gemma3:4b:
+      provider: ollama
+      name: gemma3:4b
+      context: 131072
+      role: weak
+      description: Tiny-model champion (92-100%) — aider weak model, commit messages, cheap calls
+    dolphin3:latest:
+      provider: ollama
+      name: dolphin3:latest
+      context: 131072
+      role: chat
+      description: Chat-tuned local model
+    mxbai-embed-large:latest:
+      provider: ollama
+      name: mxbai-embed-large:latest
+      context: 512
+      role: embedding
+      description: Live embeddings (1024d) — vault standard since 2026-06-11
+    nomic-embed-text:latest:
+      provider: ollama
+      name: nomic-embed-text:latest
+      context: 8192
+      role: embedding-fallback
+      description: Revert fallback for the vault embedder
+
+cloud:
+  anthropic/claude-sonnet-5:
+    provider: anthropic
+    name: claude-sonnet-5
+    context: 200000
+    role: agent
+    description: Cloud fallback for complex tasks
+
+aliases:
+  default: codestral:22b       # matches ~/.aider.conf.yml — one default everywhere
+  code: codestral:22b
+  editor: codestral:22b
+  gen: qwen3:14b
+  fast: qwen3:4b
+  agent: devstral:24b
+  reason: deepseek-r1:14b
+  deep: deepseek-r1:14b
+  weak: gemma3:4b
+  chat: dolphin3:latest
+  embed: mxbai-embed-large:latest
+  cloud: anthropic/claude-sonnet-5

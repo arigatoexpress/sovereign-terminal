@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""
+ai — unified CLI for the sovereign local agent stack.
+
+Subcommands:
+  ai code <files>          Start Aider coding session (local qwen2.5-coder:14b)
+  ai gui                    Coding agent in the browser (aider --browser)
+  ai ask "question"        Quick query via Aider (no auto-commits)
+  ai chat                  Interactive chat via Hermes
+  ai knowledge <cmd>       Knowledge vault operations
+  ai model [alias|name]    Show or switch default model
+  ai status                Show stack health (quick)
+  ai doctor                Full-stack health check (gateway, GPU tiers, vault, GUI)
+  ai ide [dir]             Open the GUI agentic coder (Cursor + Cline)
+  ai worker <cmd>          24/7 Windows dev agent (status|add|reports|show)
+  ai guard <cmd>           Test guard rules
+  ai recipe <name>         Run a project-specific recipe
+  ai session <cmd>         Capture session notes to vault
+  ai obsidian              Open Obsidian vault
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+AI_HOME = Path.home() / ".ai"
+sys.path.insert(0, str(AI_HOME / "lib"))
+
+# aider/litellm reach Ollama via this env var — make it always present.
+os.environ.setdefault("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+
+from ai_lib import (  # noqa: E402
+    AI_HOME,
+    ensure_ollama,
+    guard_check,
+    load_registry,
+    log_session,
+    resolve_alias,
+)
+
+
+def run(cmd: list[str], **kwargs) -> int:
+    print(f"[ai] {' '.join(cmd)}")
+    return subprocess.call(cmd, **kwargs)
+
+
+def cmd_code(args: list[str]) -> int:
+    # Single strong coder (default alias -> qwen2.5-coder:14b). The architect/editor
+    # split was dropped: a weak qwen3:4b architect + 14B<->14B reload thrash hurt on
+    # 24GB. num_ctx + format come from ~/.aider.conf.yml + ~/.aider.model.settings.yml.
+    registry = load_registry()
+    model = resolve_alias(os.environ.get("AI_DEFAULT_MODEL", "default"), registry)
+    if args and not args[0].startswith("-"):
+        files = args
+        extra = []
+    else:
+        files = []
+        extra = args
+    cmd = ["aider", "--model", model, "--no-show-model-warnings"] + extra + files
+    log_session("aider", cmd, "started")
+    return run(cmd)
+
+
+def cmd_gui(args: list[str]) -> int:
+    """Coding agent in the browser (aider's Streamlit GUI)."""
+    registry = load_registry()
+    model = resolve_alias(os.environ.get("AI_DEFAULT_MODEL", "default"), registry)
+    cmd = ["aider", "--model", model, "--browser", "--no-show-model-warnings"] + args
+    log_session("aider-gui", cmd, "started")
+    return run(cmd)
+
+
+def cmd_ask(args: list[str]) -> int:
+    if not args:
+        print("Usage: ai ask '<question>'", file=sys.stderr)
+        return 1
+    registry = load_registry()
+    model = resolve_alias(os.environ.get("AI_DEFAULT_MODEL", "default"), registry)
+    cmd = [
+        "aider",
+        "--model", model,
+        "--no-auto-commits",
+        "--message", " ".join(args),
+        "--exit",
+    ]
+    log_session("aider-ask", cmd, "started")
+    return run(cmd)
+
+
+def cmd_chat(args: list[str]) -> int:
+    registry = load_registry()
+    model = resolve_alias(os.environ.get("AI_DEFAULT_MODEL", "default"), registry)
+    cmd = ["hermes", "chat", "-m", model] + args
+    log_session("hermes-chat", cmd, "started")
+    return run(cmd)
+
+
+def cmd_knowledge(args: list[str]) -> int:
+    vault_cli = Path.home() / "Knowledge" / "7-Visual-Graphs" / "ai-knowledge"
+    if not vault_cli.exists():
+        print("[ai] knowledge vault CLI not found; expected", vault_cli, file=sys.stderr)
+        return 1
+    cmd = [str(vault_cli)] + args
+    log_session("knowledge", cmd, "started")
+    return run(cmd)
+
+
+def cmd_model(args: list[str]) -> int:
+    registry = load_registry()
+    if not args:
+        default = os.environ.get("AI_DEFAULT_MODEL", registry.get("aliases", {}).get("default", "?"))
+        print(f"Default model: {default}")
+        print("Aliases:")
+        for alias, model in sorted(registry.get("aliases", {}).items()):
+            print(f"  {alias:10} -> {model}")
+        return 0
+    name = args[0]
+    resolved = resolve_alias(name, registry)
+    print(f"{name} -> {resolved}")
+    print(f"To persist: export AI_DEFAULT_MODEL={resolved}")
+    return 0
+
+
+def cmd_status(args: list[str]) -> int:
+    print("Sovereign Agent Stack Status")
+    print("=" * 40)
+    print(f"Ollama reachable: {ensure_ollama()}")
+    print(f"AI_HOME: {AI_HOME}")
+    print(f"Knowledge vault: {Path.home() / 'Knowledge'}")
+    print(f"Default model env: {os.environ.get('AI_DEFAULT_MODEL', 'not set')}")
+    for tool in ["aider", "hermes", "ollama"]:
+        path = subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip()
+        print(f"{tool}: {path or 'NOT FOUND'}")
+    return 0
+
+
+def cmd_doctor(args: list[str]) -> int:
+    """Full-stack health check for the sovereign agentic terminal."""
+    import urllib.request
+
+    def http(url: str, headers: dict | None = None, timeout: float = 8.0) -> tuple[int, str]:
+        req = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.read(400).decode("utf-8", "replace")
+        except Exception as e:  # noqa: BLE001 — doctor reports, never raises
+            return 0, str(e)[:120]
+
+    token = ""
+    env_file = Path.home() / "Code" / "remote-gpu-gateway" / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith("GATEWAY_TOKEN="):
+                token = line.split("=", 1)[1].strip()
+    auth = {"Authorization": f"Bearer {token}"} if token else {}
+
+    win_dns = "desktop-hfck6u9-2.tailfbdf93.ts.net"
+    checks: list[tuple[str, bool, str]] = []
+
+    code_, body = http("http://127.0.0.1:8800/healthz", auth)
+    checks.append(("gateway :8800 /healthz", code_ == 200, "ok" if code_ == 200 else body))
+    code_, body = http("http://127.0.0.1:8800/v1/models", auth)
+    checks.append(("gateway /v1 (OpenAI-compat)", code_ == 200, "ok" if code_ == 200 else body))
+    code_, body = http("http://127.0.0.1:11434/api/version")
+    checks.append(("Mac Ollama :11434", code_ == 200, body.strip() if code_ == 200 else body))
+    code_, body = http(f"http://{win_dns}:11434/api/version", timeout=12)
+    checks.append(("Windows GPU Ollama (tailnet)", code_ == 200, body.strip() if code_ == 200 else body))
+    code_, body = http(f"http://{win_dns}:8137/health", timeout=12)
+    checks.append(("GPU forecaster :8137", code_ == 200, body[:80]))
+
+    ts = subprocess.run(
+        ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status"],
+        capture_output=True, text=True,
+    )
+    ts_up = ts.returncode == 0 and "stopped" not in ts.stdout.lower()
+    win_line = next((l for l in ts.stdout.splitlines() if "desktop-hfck6u9-2" in l), "")
+    win_online = bool(win_line) and "offline" not in win_line
+    checks.append(("Tailscale up", ts_up, "" if ts_up else ts.stdout.strip()[:80]))
+    checks.append(("Windows node on tailnet", win_online, win_line.split()[0] if win_line else "not found"))
+
+    vault_py = Path.home() / "Knowledge" / "7-Visual-Graphs" / ".venv" / "bin" / "python"
+    checks.append(("vault venv", vault_py.exists(), str(vault_py)))
+    mcp_py = Path.home() / "Knowledge" / "7-Visual-Graphs" / "knowledge_mcp.py"
+    checks.append(("knowledge MCP server", mcp_py.exists(), str(mcp_py)))
+    # GUI host is CURSOR (VS Code-based; /usr/local/bin/code symlinks to Cursor's CLI).
+    cline_mcp = (Path.home() / "Library" / "Application Support" / "Cursor" / "User"
+                 / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json")
+    checks.append(("Cline MCP wiring (Cursor)", cline_mcp.exists(), str(cline_mcp)))
+    ext = subprocess.run(["cursor", "--list-extensions"], capture_output=True, text=True)
+    has_cline = "saoudrizwan.claude-dev" in ext.stdout
+    checks.append(("Cline extension (Cursor GUI)", has_cline, "installed" if has_cline else "run: cursor --install-extension saoudrizwan.claude-dev"))
+    for tool in ("aider", "hermes"):
+        p = subprocess.run(["which", tool], capture_output=True, text=True).stdout.strip()
+        checks.append((f"{tool} on PATH", bool(p), p or "NOT FOUND"))
+
+    hb = subprocess.run(
+        ["ssh", "-o", "ConnectTimeout=10", "win-ts",
+         r"type C:\Users\aribs\agent-worker\heartbeat.json"],
+        capture_output=True, text=True,
+    )
+    hb_line = next((l for l in hb.stdout.splitlines() if l.strip().startswith("{")), "")
+    checks.append(("24/7 worker heartbeat", hb.returncode == 0 and bool(hb_line),
+                   hb_line[:80] or "unreachable"))
+
+    print("Sovereign Terminal Doctor")
+    print("=" * 46)
+    failed = 0
+    for name, ok, detail in checks:
+        mark = "\033[32mPASS\033[0m" if ok else "\033[31mFAIL\033[0m"
+        failed += 0 if ok else 1
+        print(f"  {mark}  {name:32} {detail}")
+    print("=" * 46)
+    print(f"{len(checks) - failed}/{len(checks)} healthy")
+    return 0 if failed == 0 else 1
+
+
+def cmd_ide(args: list[str]) -> int:
+    """Open the GUI agentic coder (Cursor + Cline) on a project directory."""
+    target = args[0] if args else "."
+    log_session("ide", ["cursor", target], "started")
+    return run(["cursor", target])
+
+
+def cmd_worker(args: list[str]) -> int:
+    """Control the 24/7 Windows dev agent (sovereign-agent-worker).
+
+    ai worker status          heartbeat + queue/done/failed counts
+    ai worker add <repo> <test-cmd> <goal...>   enqueue a task
+    ai worker reports [n]     print the latest n report names (default 5)
+    ai worker show <report>   print one report
+    """
+    host = "win-ts"
+    base = r"C:\Users\aribs\agent-worker"
+    if not args or args[0] == "status":
+        return run(["ssh", host,
+                    f"type {base}\\heartbeat.json & echo. & "
+                    f"echo queue: & dir /b {base}\\queue 2>nul & "
+                    f"echo done: & dir /b {base}\\done 2>nul & "
+                    f"echo failed: & dir /b {base}\\failed 2>nul"])
+    if args[0] == "add":
+        if len(args) < 4:
+            print("Usage: ai worker add <repo-path-on-windows> '<test cmd>' '<goal...>'", file=sys.stderr)
+            return 1
+        repo, test, goal = args[1], args[2], " ".join(args[3:])
+        name = re.sub(r"[^a-z0-9]+", "-", goal.lower())[:40].strip("-") or "task"
+        content = f"repo: {repo}\ntest: {test}\n---\n{goal}\n"
+        proc = subprocess.run(["ssh", host, f"cmd /c more > {base}\\queue\\{name}.md"],
+                              input=content, text=True)
+        print(f"[ai] enqueued {name}.md" if proc.returncode == 0 else "[ai] enqueue FAILED")
+        return proc.returncode
+    if args[0] == "reports":
+        n = args[1] if len(args) > 1 else "5"
+        return run(["ssh", host, f"dir /b /o-d {base}\\reports 2>nul | head -{n}"])
+    if args[0] == "show" and len(args) > 1:
+        return run(["ssh", host, f"type {base}\\reports\\{args[1]}"])
+    if args[0] == "proposed":
+        return run(["ssh", host, f"dir /b {base}\\proposed 2>nul"])
+    if args[0] == "approve" and len(args) > 1:
+        return run(["ssh", host, f"move {base}\\proposed\\{args[1]} {base}\\queue\\"])
+    if args[0] == "pull":
+        dest = Path.home() / "ops-state" / "worker-reports"
+        vault_dest = Path.home() / "Knowledge" / "6-Agent-Memory" / "worker"
+        dest.mkdir(parents=True, exist_ok=True)
+        vault_dest.mkdir(parents=True, exist_ok=True)
+        remote_base = base.replace("\\", "/")
+        rc = run(["scp", "-q", f"{host}:{remote_base}/reports/*", str(dest) + "/"])
+        if rc == 0:
+            for md in dest.glob("*.md"):
+                (vault_dest / md.name).write_text(md.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"[ai] reports -> {dest} (+ vault 6-Agent-Memory/worker; bundles reviewable via git fetch <bundle>)")
+        return rc
+    print("Usage: ai worker [status|add|reports|show|proposed|approve|pull]", file=sys.stderr)
+    return 1
+
+
+def cmd_guard(args: list[str]) -> int:
+    if not args:
+        print("Usage: ai guard '<command string>'", file=sys.stderr)
+        return 1
+    decision, reason = guard_check(" ".join(args))
+    print(f"[{decision.upper()}] {reason}")
+    return 0 if decision == "allow" else 1
+
+
+def cmd_recipe(args: list[str]) -> int:
+    if not args:
+        recipes = list((AI_HOME / "recipes").glob("*.sh"))
+        print("Available recipes:")
+        for r in recipes:
+            print(f"  {r.stem}")
+        return 0
+    recipe = AI_HOME / "recipes" / f"{args[0]}.sh"
+    if not recipe.exists():
+        print(f"[ai] recipe not found: {recipe}", file=sys.stderr)
+        return 1
+    return run(["bash", str(recipe)] + args[1:])
+
+
+def cmd_session(args: list[str]) -> int:
+    return run(["ai-session"] + args)
+
+
+def cmd_obsidian(args: list[str]) -> int:
+    vault = Path.home() / "Knowledge"
+    # Try to open Obsidian with the vault
+    return run(["open", "-a", "Obsidian", str(vault)])
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 0
+    sub, *args = sys.argv[1:]
+    dispatch = {
+        "code": cmd_code,
+        "gui": cmd_gui,
+        "ask": cmd_ask,
+        "chat": cmd_chat,
+        "knowledge": cmd_knowledge,
+        "model": cmd_model,
+        "status": cmd_status,
+        "doctor": cmd_doctor,
+        "ide": cmd_ide,
+        "worker": cmd_worker,
+        "guard": cmd_guard,
+        "recipe": cmd_recipe,
+        "session": cmd_session,
+        "obsidian": cmd_obsidian,
+    }
+    fn = dispatch.get(sub)
+    if not fn:
+        print(f"Unknown command: {sub}", file=sys.stderr)
+        print(__doc__, file=sys.stderr)
+        return 1
+    return fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
