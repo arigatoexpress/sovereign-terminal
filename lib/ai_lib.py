@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
 ai_lib.py — shared utilities for the sovereign `ai` CLI.
+
+Model plane (2026-07-20): registry.yaml RETIRED. Aliases and local model names
+are explicit here. Consumers (aider, hermes, gpu) own their own defaults;
+this map is only for the `ai` CLI role shortcuts. Gateway stays a pure
+byte-forwarder — unknown models 404 at Ollama.
 """
 from __future__ import annotations
 
@@ -12,33 +17,80 @@ from pathlib import Path
 from typing import Optional
 
 AI_HOME = Path.home() / ".ai"
+# Historical path — kept only so load_registry can report retirement.
 REGISTRY_PATH = AI_HOME / "models" / "registry.yaml"
+REGISTRY_RETIRED_PATH = AI_HOME / "models" / "registry.yaml.retired"
 VAULT_PATH = Path(os.environ.get("KNOWLEDGE_VAULT", Path.home() / "Knowledge"))
+
+# Explicit role → concrete Ollama model (no central SoT file).
+ALIASES: dict[str, str] = {
+    "default": "qwen2.5-coder:14b",
+    "code": "qwen2.5-coder:14b",
+    "coder": "codestral:22b",
+    "editor": "qwen2.5-coder:14b",
+    "speed": "gpt-oss:20b",
+    "agent": "qwen3-coder:30b",
+    "gen": "qwen3:14b",
+    "fast": "qwen3:4b",
+    "reason": "deepseek-r1:14b",
+    "deep": "deepseek-r1:14b",
+    "weak": "gemma3:4b",
+    "chat": "dolphin3:latest",
+    "embed": "mxbai-embed-large:latest",
+    "cloud": "anthropic/claude-sonnet-5",
+}
+
+# Known local model ids (for ollama/ prefix resolution). Not a health roster.
+LOCAL_MODELS: frozenset[str] = frozenset({
+    "codestral:22b",
+    "qwen2.5-coder:14b",
+    "qwen3:14b",
+    "qwen3-coder:30b",
+    "gpt-oss:20b",
+    "gemma3:4b",
+    "gemma4:12b",
+    "qwen3-vl:8b",
+    "devstral:24b",
+    "deepseek-r1:14b",
+    "deepseek-r1:8b",
+    "qwen3:4b",
+    "dolphin3:latest",
+    "mxbai-embed-large:latest",
+    "nomic-embed-text:latest",
+})
 
 
 def load_registry() -> dict:
-    import yaml
+    """Backward-compatible shape for callers that still expect a registry dict.
 
-    if not REGISTRY_PATH.exists():
-        return {}
-    with open(REGISTRY_PATH) as f:
-        return yaml.safe_load(f) or {}
+    Does NOT read registry.yaml (retired). Returns the explicit in-code map.
+    """
+    return {
+        "aliases": dict(ALIASES),
+        "local": {
+            "base_url": "http://127.0.0.1:8800/v1",
+            "default": ALIASES["default"],
+            "models": {m: {"provider": "ollama", "name": m} for m in sorted(LOCAL_MODELS)},
+        },
+        "retired": True,
+        "source": "ai_lib.ALIASES",
+    }
 
 
 def resolve_alias(name: str, registry: Optional[dict] = None) -> str:
     """Resolve a model alias (fast, deep, editor) to a concrete model name."""
     if "/" in name:
         return name
-    registry = registry or load_registry()
-    aliases = registry.get("aliases", {})
+    aliases = (registry or load_registry()).get("aliases", ALIASES)
     if name in aliases:
-        return aliases[name]
-    local_models = registry.get("local", {}).get("models", {})
-    if name in local_models:
+        target = aliases[name]
+        if "/" in target:
+            return target
+        if target in LOCAL_MODELS or ":" in target:
+            return f"ollama/{target}" if not target.startswith("ollama/") else target
+        return target
+    if name in LOCAL_MODELS:
         return f"ollama/{name}"
-    cloud_models = registry.get("cloud", {})
-    if name in cloud_models:
-        return f"anthropic/{name}" if cloud_models[name].get("provider") == "anthropic" else name
     return name
 
 
